@@ -116,8 +116,17 @@ class QueryParser:
             self.normalization_map = {}
 
     def normalize_skill(self, skill: str) -> str:
-        """Normalize skill name using normalization map"""
+        """Normalize skill name using normalization map and remove requirement keywords"""
         skill_lower = skill.lower().strip()
+
+        # Remove trailing requirement keywords
+        requirement_keywords = ['mandatory', 'required', 'must have', 'essential', 'optional', 'nice to have', 'good to have', 'preferred', 'bonus', 'added advantage', 'not required']
+        
+        # Remove these keywords from the end of the skill name
+        for keyword in requirement_keywords:
+            if skill_lower.endswith(keyword):
+                skill_lower = skill_lower[:-len(keyword)].strip()
+                break
 
         if skill_lower in self.normalization_map:
             return self.normalization_map[skill_lower]
@@ -351,6 +360,7 @@ class QueryParser:
         optional_keywords = [
             r'added advantage',
             r'nice to have',
+            r'good to have',
             r'bonus',
             r'preferred',
             r'optional',
@@ -379,6 +389,179 @@ class QueryParser:
                     optional_sections.append(section)
         
         return optional_sections
+
+    def _detect_mandatory_skills(self, query: str) -> List[str]:
+        """
+        Extract sections that contain mandatory keywords.
+        Returns: List of text sections marked as mandatory
+        """
+        mandatory_keywords = [
+            r'mandatory',
+            r'required',
+            r'must have',
+            r'essential',
+        ]
+        
+        mandatory_sections = []
+        query_lower = query.lower()
+        
+        for keyword in mandatory_keywords:
+            if keyword in query_lower:
+                # Find the start: look for comma before the keyword or beginning
+                idx = query_lower.find(keyword)
+                start = query_lower.rfind(',', 0, idx)
+                if start == -1:
+                    start = 0
+                else:
+                    start += 1
+                
+                # Find the end: look for comma after the keyword or end
+                end = query_lower.find(',', idx)
+                if end == -1:
+                    end = len(query)
+                
+                section = query[start:end].strip()
+                if section and section not in mandatory_sections:
+                    mandatory_sections.append(section)
+        
+        return mandatory_sections
+
+    def _determine_skill_type(self, query: str, end_pos: int) -> str:
+        """
+        Determine if a skill is mandatory or optional based on keywords after its position.
+        Handles multiple skills by finding the next comma or end of string.
+        
+        Key logic:
+        - Only looks at text between current position and next comma/clause boundary
+        - Defaults to 'mandatory' if no explicit keyword found
+        - Does not look beyond clause boundaries
+        
+        Returns: 'mandatory', 'optional', or 'unknown'
+        """
+        query_lower = query.lower()
+        
+        # Find the next comma or 'and' after the skill to define clause boundary
+        next_comma = query_lower.find(',', end_pos)
+        next_and = query_lower.find(' and ', end_pos)
+        
+        # Determine clause boundary
+        clause_end = len(query)
+        if next_comma != -1 and next_and != -1:
+            # Both exist, use the nearest one
+            clause_end = min(next_comma, next_and)
+        elif next_comma != -1:
+            clause_end = next_comma
+        elif next_and != -1:
+            clause_end = next_and
+        
+        # Only look within this clause
+        window_text = query_lower[end_pos:clause_end]
+        
+        mandatory_keywords = ['mandatory', 'required', 'must have', 'essential']
+        optional_keywords = ['optional', 'nice to have', 'good to have', 'preferred', 'bonus', 'added advantage', 'not required']
+        
+        # Check mandatory first
+        for keyword in mandatory_keywords:
+            if keyword in window_text:
+                return 'mandatory'
+        
+        # Then optional
+        for keyword in optional_keywords:
+            if keyword in window_text:
+                return 'optional'
+        
+        # If no keyword found, default to 'unknown' (will be handled by caller)
+        return 'unknown'
+        
+        return 'unknown'
+
+    def _extract_skill_requirements(self, query: str) -> Dict[str, str]:
+        """
+        Extract all skills and their requirement types (mandatory or optional) from the query.
+        Builds a map of skill -> type by analyzing comma-separated clauses and 'and' separated parts.
+        
+        Handles multiple skills in different clauses with different requirement types.
+        Supports comma-separated clauses and "and" separators when requirement keywords are present.
+        
+        Example: "Python 2 years mandatory, SQL Server 2 years optional, AWS 2 years optional"
+        Example: "C# 2 years mandatory and AWS 2 years nice to have, JavaScript 2 years as optional"
+        Returns: {'python': 'mandatory', 'sql': 'optional', 'aws': 'optional'}
+        """
+        skill_requirement_map = {}
+        query_lower = query.lower()
+        
+        # First split by comma, then by 'and' within clauses that don't have commas
+        clauses = []
+        
+        for comma_clause in query.split(','):
+            # For each comma-separated clause, further split by 'and' if there are requirement keywords
+            # This handles cases like "C# mandatory and AWS nice to have"
+            if ' and ' in comma_clause.lower():
+                # Split by 'and' only if the clause contains requirement keywords
+                has_requirement = False
+                for keyword in ['mandatory', 'required', 'must have', 'essential', 'optional', 'nice to have', 'good to have', 'preferred', 'bonus']:
+                    if keyword in comma_clause.lower():
+                        has_requirement = True
+                        break
+                
+                if has_requirement:
+                    # Split by 'and' to separate different skill requirements
+                    and_parts = comma_clause.split(' and ')
+                    for part in and_parts:
+                        if part.strip():
+                            clauses.append(part.strip())
+                else:
+                    clauses.append(comma_clause.strip())
+            else:
+                clauses.append(comma_clause.strip())
+        
+        for clause in clauses:
+            clause_lower = clause.lower()
+            
+            # Skip empty clauses
+            if not clause.strip():
+                continue
+            
+            # Check if this clause contains a requirement keyword
+            mandatory_keywords = ['mandatory', 'required', 'must have', 'essential']
+            optional_keywords = ['optional', 'nice to have', 'good to have', 'preferred', 'bonus', 'added advantage', 'not required']
+            
+            requirement_type = None
+            
+            # Check mandatory keywords first (higher priority)
+            for keyword in mandatory_keywords:
+                if keyword in clause_lower:
+                    requirement_type = 'mandatory'
+                    break
+            
+            # If mandatory not found, check optional keywords
+            if requirement_type is None:
+                for keyword in optional_keywords:
+                    if keyword in clause_lower:
+                        requirement_type = 'optional'
+                        break
+            
+            # If we found a requirement type, extract ALL skill names from this clause
+            if requirement_type is not None:
+                skills_found_in_clause = []
+                
+                # Extract technology names from this clause using keyword matching
+                for tech in self.known_techs:
+                    tech_lower = tech.lower()
+                    if tech_lower in clause_lower:
+                        normalized = self.normalize_skill(tech)
+                        normalized_lower = normalized.lower()
+                        
+                        # Track this skill for this clause
+                        if normalized_lower not in skills_found_in_clause:
+                            skills_found_in_clause.append(normalized_lower)
+                
+                # Add all skills found in this clause with the same requirement type
+                for skill_lower in skills_found_in_clause:
+                    skill_requirement_map[skill_lower] = requirement_type
+                    print(f"[INFO] 📋 Skill '{skill_lower}' → '{requirement_type}' (clause: {clause.strip()[:50]}...)")
+        
+        return skill_requirement_map
 
     def _extract_locations(self, query: str, doc) -> List[str]:
         """
@@ -532,8 +715,8 @@ class QueryParser:
         # ⭐ STEP 0.25: Detect availability status
         availability = self._detect_availability(query)
 
-        # ⭐ STEP 0.5: Detect optional skills/attributes
-        optional_sections = self._detect_optional_skills(query)
+        # ⭐ STEP 0.5: Build skill requirement map from clause analysis
+        skill_requirement_map = self._extract_skill_requirements(query)
 
         # ⭐ STEP 0.75: Extract locations (handles multiple locations with and/or/,)
         locations = self._extract_locations(query, doc)
@@ -564,22 +747,36 @@ class QueryParser:
 
             if ent.label_ == "TECHNOLOGY":
                 normalized = self.normalize_skill(entity_text)
+                normalized_lower = normalized.lower()
                 
-                # Check if this technology is in optional sections
-                is_optional = False
-                for optional_text in optional_sections:
-                    if normalized.lower() in optional_text.lower():
-                        is_optional = True
-                        break
-                
-                if is_optional:
-                    if normalized not in optional_technologies:
-                        optional_technologies.append(normalized)
-                        print(f"[INFO] 🔷 Detected optional technology: {normalized}")
+                # Check skill requirement map first (clause-based analysis)
+                if normalized_lower in skill_requirement_map:
+                    requirement = skill_requirement_map[normalized_lower]
+                    if requirement == 'mandatory':
+                        if normalized not in technologies:
+                            technologies.append(normalized)
+                            print(f"[INFO] 🔶 Detected mandatory technology (from skill map): {normalized}")
+                    elif requirement == 'optional':
+                        if normalized not in optional_technologies:
+                            optional_technologies.append(normalized)
+                            print(f"[INFO] 🔷 Detected optional technology (from skill map): {normalized}")
                 else:
-                    if normalized not in technologies:
-                        technologies.append(normalized)
-                        print(f"[INFO] 🔶 Detected required technology: {normalized}")
+                    # Fallback to position-based detection
+                    skill_type = self._determine_skill_type(query, ent.end_char)
+                    
+                    if skill_type == 'mandatory':
+                        if normalized not in technologies:
+                            technologies.append(normalized)
+                            print(f"[INFO] 🔶 Detected mandatory technology: {normalized}")
+                    elif skill_type == 'optional':
+                        if normalized not in optional_technologies:
+                            optional_technologies.append(normalized)
+                            print(f"[INFO] 🔷 Detected optional technology: {normalized}")
+                    else:
+                        # Default to mandatory if no keyword found
+                        if normalized not in technologies:
+                            technologies.append(normalized)
+                            print(f"[INFO] 🔶 Detected technology (default mandatory): {normalized}")
 
             elif ent.label_ == "TECH_CATEGORY":
                 if entity_text.lower() not in [c.lower() for c in tech_categories]:
@@ -632,10 +829,54 @@ class QueryParser:
 
         # ⭐ STEP 2.5: Fallback keyword matching for case-insensitive skills
         keyword_skills = self._extract_skills_from_keywords(query_lower)
+        
+        # Find positions of optional keywords to help classify unmapped skills
+        optional_keyword_positions = []
+        optional_keywords = ['optional', 'nice to have', 'good to have', 'preferred', 'bonus', 'added advantage', 'not required']
+        for keyword in optional_keywords:
+            pos = query_lower.find(keyword)
+            if pos != -1:
+                optional_keyword_positions.append(pos)
+        
+        first_optional_keyword_pos = min(optional_keyword_positions) if optional_keyword_positions else len(query)
+        
         for skill in keyword_skills:
-            if skill not in technologies:
-                technologies.append(skill)
-                print(f"[INFO] ✅ Added skill from keyword match: {skill}")
+            normalized = self.normalize_skill(skill)
+            normalized_lower = normalized.lower()
+            
+            if normalized not in technologies and normalized not in optional_technologies:
+                # Check skill requirement map first
+                if normalized_lower in skill_requirement_map:
+                    requirement = skill_requirement_map[normalized_lower]
+                    if requirement == 'mandatory':
+                        technologies.append(normalized)
+                        print(f"[INFO] 🔶 Detected mandatory technology (fallback from skill map): {normalized}")
+                    elif requirement == 'optional':
+                        optional_technologies.append(normalized)
+                        print(f"[INFO] 🔷 Detected optional technology (fallback from skill map): {normalized}")
+                else:
+                    # For unmapped skills, check if skill appears before first optional keyword
+                    skill_pos = query_lower.find(skill.lower())
+                    
+                    if skill_pos != -1:
+                        # Smart classification: if skill appears before any "optional" keyword, it's mandatory
+                        if skill_pos < first_optional_keyword_pos:
+                            technologies.append(normalized)
+                            print(f"[INFO] 🔶 Detected technology as mandatory (appears before 'optional'): {normalized}")
+                        else:
+                            # Skill appears after optional keyword, check the immediate context
+                            skill_type = self._determine_skill_type(query, skill_pos + len(skill))
+                            if skill_type == 'optional':
+                                optional_technologies.append(normalized)
+                                print(f"[INFO] 🔷 Detected optional technology (fallback): {normalized}")
+                            else:
+                                # Default to mandatory
+                                technologies.append(normalized)
+                                print(f"[INFO] 🔶 Detected technology (fallback default mandatory): {normalized}")
+                    else:
+                        # Couldn't find position, default to mandatory
+                        technologies.append(normalized)
+                        print(f"[INFO] 🔶 Detected technology (fallback default mandatory): {normalized}")
 
         # ⭐ STEP 2.6: Role keyword fallback - ensure roles like 'developer' are captured
         if hasattr(self, '_role_pattern') and self._role_pattern.search(query):
@@ -675,9 +916,55 @@ class QueryParser:
                 if kw:
                     roles.append(kw.capitalize())
 
-        # ⭐ STEP 3: Merge categories
-        all_categories = list(dict.fromkeys(detected_categories + tech_categories))
+        # ⭐ STEP 3: Merge categories and classify them as mandatory/optional
+        # Deduplicate categories case-insensitively while preserving original case
+        seen_categories = {}
+        for cat in detected_categories + tech_categories:
+            cat_lower = cat.lower()
+            if cat_lower not in seen_categories:
+                seen_categories[cat_lower] = cat
+        all_categories = list(seen_categories.values())
         category_skills = list(dict.fromkeys(category_skills))
+        
+        # Classify categories based on skill requirement map
+        mandatory_categories = []
+        optional_categories = []
+        
+        for category in all_categories:
+            category_lower = category.lower()
+            
+            # Check if any skill in this category was marked in the skill_requirement_map
+            category_requirement = None
+            for skill_lower, requirement in skill_requirement_map.items():
+                # If a category name appears in requirement map, use that
+                if category_lower == skill_lower:
+                    category_requirement = requirement
+                    break
+            
+            # If category not found in requirement map, check if it appears before optional keywords
+            if category_requirement is None:
+                optional_keyword_positions = []
+                optional_keywords = ['optional', 'nice to have', 'good to have', 'preferred', 'bonus', 'added advantage', 'not required']
+                for keyword in optional_keywords:
+                    pos = query_lower.find(keyword)
+                    if pos != -1:
+                        optional_keyword_positions.append(pos)
+                
+                first_optional_keyword_pos = min(optional_keyword_positions) if optional_keyword_positions else len(query)
+                category_pos = query_lower.find(category_lower)
+                
+                if category_pos != -1 and category_pos < first_optional_keyword_pos:
+                    category_requirement = 'mandatory'
+                elif 'optional' in query_lower or 'nice to have' in query_lower or 'good to have' in query_lower:
+                    # If there are optional keywords and category appears after them, check context
+                    category_requirement = 'optional'
+                else:
+                    category_requirement = 'mandatory'
+            
+            if category_requirement == 'mandatory':
+                mandatory_categories.append(category)
+            elif category_requirement == 'optional':
+                optional_categories.append(category)
 
         # ⭐ STEP 4: Map experiences to specific skills
         skill_experience_map = self._map_experiences_to_skills(
@@ -707,6 +994,8 @@ class QueryParser:
             'skills': technologies,
             'optional_skills': optional_technologies,  # ⭐ NEW: Optional/nice-to-have skills
             'categories': all_categories,  # ⭐ Now includes detected categories
+            'mandatory_categories': mandatory_categories,  # ⭐ NEW: Categories marked as mandatory
+            'optional_categories': optional_categories,  # ⭐ NEW: Categories marked as optional
             'category_skills': category_skills,  # ⭐ Now includes expanded skills
 
             # Global experience (backward compatibility)
@@ -743,6 +1032,8 @@ class QueryParser:
                 'skills': technologies,
                 'optional_skills': optional_technologies,  # ⭐ Optional/nice-to-have skills
                 'categories': all_categories,
+                'mandatory_categories': mandatory_categories,  # ⭐ NEW: Mandatory categories
+                'optional_categories': optional_categories,  # ⭐ NEW: Optional categories
                 'category_skills': category_skills,
                 'tech_experiences': tech_experiences,
                 'overall_experiences': overall_experiences,
